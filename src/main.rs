@@ -26,6 +26,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use tracing::info;
+use tower_http::services::{ServeDir, ServeFile};
 
 use state::{AppState, Config, Room};
 
@@ -50,11 +51,15 @@ async fn main() {
 
     tokio::spawn(gc_task(Arc::clone(&state)));
 
+    let static_dir = std::env::var("WEB_DIR").unwrap_or_else(|_| "web".into());
+    let index = format!("C:/Users/User/Desktop/Programme/ryokan-io/relay-server/webclient/dist/index.html");
+
     let app = Router::new()
         .route("/api/health", get(|| async { "ok" }))
         .route("/api/rooms", post(create_room))
         .route("/ws/:room_id", get(ws::ws_handler))
-        // Dev-friendly CORS; lock this down to your frontend origin in prod.
+        // Statische Dateien; Fallback auf index.html, damit "/?mp=CODE#k=..." funktioniert.
+        .fallback_service(ServeDir::new(&static_dir).fallback(ServeFile::new(index)))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
