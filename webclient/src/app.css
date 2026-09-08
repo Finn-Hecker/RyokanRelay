@@ -22,6 +22,32 @@ button, input, textarea { color: inherit; font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid rgba(212, 180, 131, 0.8); outline-offset: 2px; }
 
+.language-switcher {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.language-switcher button {
+  width: 29px;
+  height: 25px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #62626a;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: color 150ms, background 150ms;
+}
+.language-switcher button:hover { color: #c8c8ce; }
+.language-switcher button.active { background: rgba(212, 180, 131, 0.14); color: var(--accent); }
+.gate-language { position: fixed; z-index: 2; top: max(18px, env(safe-area-inset-top)); right: max(18px, env(safe-area-inset-right)); }
+
 .gate {
   min-height: 100dvh;
   overflow-y: auto;
@@ -195,7 +221,10 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
   .gate-card { padding: 27px 22px; border-radius: 17px; }
   .brand-mark, .room-badge { margin-bottom: 20px; }
   .privacy-note { font-size: 9.5px; }
-  .character-copy strong { max-width: 160px; }
+  .header-inner { gap: 8px; }
+  .header-actions { gap: 6px; }
+  .character-copy strong { max-width: calc(100vw - 190px); }
+  .character-copy .participant-line { display: none; }
   .encrypted-label { display: none; }
   .message-meta time { display: none; }
   .empty-state { min-height: 40vh; }

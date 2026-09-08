@@ -20,15 +20,28 @@ export type ClosedReason =
   | 'error'
   | 'left';
 
-export interface MpMessage {
+export type JoinError = '' | 'invalid_link' | 'missing_key';
+
+interface MpMessageBase {
   id: string;
-  kind: 'chat' | 'llm' | 'system';
+  ts: number;
+}
+
+export interface MpContentMessage extends MpMessageBase {
+  kind: 'chat' | 'llm';
   author: string;
   text: string;
-  ts: number;
   streaming?: boolean;
   mine?: boolean;
 }
+
+export interface MpSystemMessage extends MpMessageBase {
+  kind: 'system';
+  event: 'participant_joined' | 'participant_left';
+  count: number;
+}
+
+export type MpMessage = MpContentMessage | MpSystemMessage;
 
 export interface SessionCharacter {
   name: string;
@@ -53,7 +66,7 @@ export const mpState = $state({
   characterName: '',
   sessionCharacter: null as SessionCharacter | null,
   closedReason: '' as ClosedReason,
-  error: '' as '' | 'invalid_link' | 'missing_key',
+  error: '' as JoinError,
 });
 
 let ws: WebSocket | null = null;
@@ -263,12 +276,12 @@ async function handleServerMsg(msg: any): Promise<void> {
 
     case 'joined':
       mpState.count = msg.count;
-      pushSystem(`Jemand ist beigetreten · ${msg.count} im Raum`);
+      pushSystem('participant_joined', msg.count);
       break;
 
     case 'left':
       mpState.count = msg.count;
-      pushSystem(`Jemand hat den Raum verlassen · ${msg.count} im Raum`);
+      pushSystem('participant_left', msg.count);
       break;
 
     case 'relay': {
@@ -344,7 +357,9 @@ function handleDecrypted(inner: any): void {
     case 'llm_d': {
       const mid = String(inner.mid);
       if (completedStreamIds.has(mid)) return;
-      let m = mpState.messages.find((x) => x.id === mid);
+      let m = mpState.messages.find(
+        (message): message is MpContentMessage => message.kind === 'llm' && message.id === mid,
+      );
       if (!m) {
         m = {
           id: mid,
@@ -375,7 +390,9 @@ function handleDecrypted(inner: any): void {
       const finalText = typeof inner.text === 'string' ? inner.text : null;
       const finalAuthor = typeof inner.name === 'string' ? inner.name : null;
       const finalTimestamp = Number(inner.ts) || 0;
-      let m = mpState.messages.find((x) => x.id === mid);
+      let m = mpState.messages.find(
+        (message): message is MpContentMessage => message.kind === 'llm' && message.id === mid,
+      );
       if (!m && finalText !== null) {
         m = {
           id: mid,
@@ -428,18 +445,20 @@ function handleDecrypted(inner: any): void {
   }
 }
 
-function pushSystem(text: string): void {
+function pushSystem(event: MpSystemMessage['event'], count: number): void {
   mpState.messages.push({
     id: crypto.randomUUID(),
     kind: 'system',
-    author: '',
-    text,
+    event,
+    count,
     ts: Date.now(),
   });
 }
 
 function finalizeStreaming(): void {
-  for (const m of mpState.messages) if (m.streaming) m.streaming = false;
+  for (const message of mpState.messages) {
+    if (message.kind === 'llm' && message.streaming) message.streaming = false;
+  }
 }
 
 // ---------------------------------------------------------------- sending

@@ -25,8 +25,8 @@ use rand::Rng;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
-use tracing::info;
 use tower_http::services::{ServeDir, ServeFile};
+use tracing::info;
 
 use state::{AppState, Config, Room};
 
@@ -52,7 +52,7 @@ async fn main() {
     tokio::spawn(gc_task(Arc::clone(&state)));
 
     let static_dir = std::env::var("WEB_DIR").unwrap_or_else(|_| "web".into());
-    let index = format!("C:/Users/User/Desktop/Programme/ryokan-io/relay-server/webclient/dist/index.html");
+    let index = std::path::Path::new(&static_dir).join("index.html");
 
     let app = Router::new()
         .route("/api/health", get(|| async { "ok" }))

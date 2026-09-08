@@ -30,7 +30,7 @@ Die expliziten `/api`- und `/ws`-Routen haben Vorrang; alles andere kommt aus de
 Ordner. Der Schlüssel (`#k=...`) steht im URL-Fragment und wird vom Browser nie an
 den Server geschickt — er taucht also auch nicht in HTTP-Logs auf.
 
-## 3. Frontend bauen und daneben legen
+## 3. Frontend bauen
 
 ```
 cd webclient
@@ -38,11 +38,11 @@ npm install
 npm run build
 ```
 
-Dann `dist/` neben das Server-Binary kopieren (oder `WEB_DIR` setzen):
-
-```
-cp -r dist /pfad/zum/server/web
-```
+Der Vite-Build schreibt direkt und vollständig in den vom Relay standardmäßig
+ausgelieferten Ordner `../web`. Dadurch kann dort kein älterer `dist`-Build
+liegen bleiben. Für einen anderen Ort kann das Relay anschließend mit
+`WEB_DIR=/pfad/zum/web` gestartet werden; dieser Ordner muss den gebauten Inhalt
+einschließlich `index.html` enthalten.
 
 Fertig: Gäste öffnen einfach `https://dein-server/…`, fügen den Einladungslink
 ein (oder klicken ihn direkt an), geben ihren Namen ein und sind drin.

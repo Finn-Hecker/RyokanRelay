@@ -1,0 +1,75 @@
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "document_title": "Join · Character Chat",
+  "language_switcher_label": "Language",
+  "switch_to_english": "Switch to English",
+  "switch_to_german": "Switch to German",
+  "join_title": "Experience stories together",
+  "join_intro": "Paste the invitation link the host sent you. The key stays in your browser, and your conversation is end-to-end encrypted.",
+  "invitation_link": "Invitation link",
+  "invitation_link_placeholder": "https://…/?mp=ABC123#k=…",
+  "continue_button": "Continue",
+  "encrypted_before_leaving": "Encrypted before anything leaves your device",
+  "room_label": "Room {roomId}",
+  "name_title": "How should the others see you?",
+  "name_intro": "This name will be shown next to your messages.",
+  "your_name": "Your name",
+  "name_placeholder": "Enter your name",
+  "connecting": "Connecting…",
+  "join_room": "Join room",
+  "back": "Back",
+  "participants_in_room": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} person in the room",
+        "countPlural=*": "{count} people in the room"
+      }
+    }
+  ],
+  "end_to_end_encrypted": "End-to-end encrypted",
+  "leave_room": "Leave room",
+  "leave": "Leave",
+  "response_is_being_generated": "Response is being generated",
+  "empty_title": "It's quiet here",
+  "empty_description": "Write something or wait for the host to start the story.",
+  "enter_new_link": "Enter a new link",
+  "wait_briefly": "Please wait…",
+  "message_placeholder": "Write a message…",
+  "message": "Message",
+  "character_typing": "{characterName} is typing…",
+  "default_character": "The character",
+  "generate_response_title": "Ask the character to respond",
+  "generate_response": "Respond now",
+  "send_message": "Send message",
+  "closed_host_left": "The host closed the room.",
+  "closed_expired": "The room has expired.",
+  "closed_not_found": "This room no longer exists. Check the link.",
+  "closed_idle": "Disconnected due to inactivity.",
+  "closed_slow": "Disconnected because the connection was too slow.",
+  "closed_error": "Connection failed. Is the host online?",
+  "closed_left": "You left the room.",
+  "error_invalid_link": "That doesn't look like an invitation link.",
+  "error_missing_key": "That's only a room code. You need the full link—it contains the decryption key.",
+  "system_participant_joined": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "Someone joined · {count} person in the room",
+        "countPlural=*": "Someone joined · {count} people in the room"
+      }
+    }
+  ],
+  "system_participant_left": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "Someone left · {count} person in the room",
+        "countPlural=*": "Someone left · {count} people in the room"
+      }
+    }
+  ]
+}
