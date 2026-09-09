@@ -14,7 +14,7 @@ async def recv_json(ws, timeout=3):
 
 async def main():
     room = create_room()
-    rid, token = room["room_id"], room["host_token"]
+    rid, token, guest_token = room["room_id"], room["host_token"], room["guest_token"]
     ok = lambda name, cond: print(("PASS " if cond else "FAIL ") + name) or (cond or sys.exit(1))
 
     host = await websockets.connect(f"{WS}/ws/{rid}")
@@ -41,14 +41,14 @@ async def main():
     ok("duplicate host closed 4409", closed)
 
     g1 = await websockets.connect(f"{WS}/ws/{rid}")
-    await g1.send(json.dumps({"t": "hello"}))
+    await g1.send(json.dumps({"t": "hello", "guest_token": guest_token}))
     w1 = await recv_json(g1)
     ok("guest welcome", w1["t"] == "welcome" and w1["role"] == "guest" and w1["count"] == 2)
     j = await recv_json(host)
     ok("host sees joined", j["t"] == "joined" and j["count"] == 2)
 
     g2 = await websockets.connect(f"{WS}/ws/{rid}")
-    await g2.send(json.dumps({"t": "hello"}))
+    await g2.send(json.dumps({"t": "hello", "guest_token": guest_token}))
     w2 = await recv_json(g2)
     await recv_json(host); await recv_json(g1)  # joined events
 
@@ -106,7 +106,7 @@ async def main():
 
     # room is gone
     g3 = await websockets.connect(f"{WS}/ws/{rid}")
-    await g3.send(json.dumps({"t": "hello"}))
+    await g3.send(json.dumps({"t": "hello", "guest_token": guest_token}))
     try:
         await g3.recv(); gone = False
     except websockets.ConnectionClosed as e:

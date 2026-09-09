@@ -16,7 +16,10 @@ mod ws;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -61,17 +64,21 @@ async fn main() {
         // Statische Dateien; Fallback auf index.html, damit "/?mp=CODE#k=..." funktioniert.
         .fallback_service(ServeDir::new(&static_dir).fallback(ServeFile::new(index)))
         .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(cache_headers))
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     info!(%addr, "relay server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .expect("server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .expect("server error");
 }
 
 #[derive(Serialize)]
@@ -79,16 +86,42 @@ struct CreateRoomResponse {
     room_id: String,
     /// Returned exactly once. The server keeps only a SHA-256 hash of it.
     host_token: String,
+    /// Relay-visible admission token. It is deliberately distinct from the
+    /// end-to-end encryption key, which is generated only by the host client.
+    guest_token: String,
 }
 
-async fn create_room(State(state): State<SharedState>) -> Json<CreateRoomResponse> {
+async fn create_room(
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    State(state): State<SharedState>,
+) -> Result<Json<CreateRoomResponse>, StatusCode> {
+    let client_ip = if state.cfg.trust_proxy {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(peer.ip())
+    } else {
+        peer.ip()
+    };
+    if !state.allow_room_create(client_ip) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let mut rng = rand::thread_rng();
 
     let token_bytes: [u8; 32] = rng.gen();
     let host_token = URL_SAFE_NO_PAD.encode(token_bytes);
     let host_token_hash: [u8; 32] = Sha256::digest(host_token.as_bytes()).into();
+    let guest_token_bytes: [u8; 32] = rng.gen();
+    let guest_token = URL_SAFE_NO_PAD.encode(guest_token_bytes);
+    let guest_token_hash: [u8; 32] = Sha256::digest(guest_token.as_bytes()).into();
 
     let mut rooms = state.rooms.lock().unwrap();
+    if rooms.len() >= state.cfg.max_rooms {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let room_id = loop {
         let candidate: String = (0..CODE_LEN)
             .map(|_| CODE_ALPHABET[rng.gen_range(0..CODE_ALPHABET.len())] as char)
@@ -97,14 +130,34 @@ async fn create_room(State(state): State<SharedState>) -> Json<CreateRoomRespons
             break candidate;
         }
     };
-    rooms.insert(room_id.clone(), Room::new(host_token_hash));
+    rooms.insert(
+        room_id.clone(),
+        Room::new(host_token_hash, guest_token_hash),
+    );
     drop(rooms);
 
     info!(room = %room_id, "room created");
-    Json(CreateRoomResponse {
+    Ok(Json(CreateRoomResponse {
         room_id,
         host_token,
-    })
+        guest_token,
+    }))
+}
+
+async fn cache_headers(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
+    let value = if path.starts_with("/assets/") {
+        HeaderValue::from_static("public, max-age=31536000, immutable")
+    } else if path.starts_with("/api/") {
+        HeaderValue::from_static("no-store")
+    } else {
+        // Revalidate HTML and other entry files so a fingerprinted new build
+        // is discovered without users clearing their browser cache.
+        HeaderValue::from_static("no-cache")
+    };
+    response.headers_mut().insert(CACHE_CONTROL, value);
+    response
 }
 
 /// Garbage collection: rooms whose host is not connected (never joined, e.g.

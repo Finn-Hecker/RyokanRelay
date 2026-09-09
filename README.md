@@ -8,12 +8,13 @@ Built with axum and tokio. Axum handles the WebSocket upgrade and routing cleanl
 
 All rooms live in a single Mutex<HashMap<RoomId, Room>>. The lock is only held for a quick, allocation free broadcast step with no awaiting, so a shared map works fine at this scale (hundreds of rooms, dozens of participants each). Sharding would be premature.
 
-Each connection has a bounded queue of 256 frames. If a client falls behind, only that client is disconnected (close code 4413). Everyone else is unaffected apart from a "left" event.
+Each connection has a bounded queue of 16 frames. If a client falls behind, only that client is disconnected (close code 4413). Everyone else is unaffected apart from a "left" event.
 
 There are two separate secrets:
 
 - The room key (AES-GCM, kept in the URL fragment) never reaches the server. It exists purely for confidentiality between clients.
 - The host token is an authorization secret the server does need to check. The server only stores a SHA-256 hash of it and compares it in constant time. The plain token only ever exists on the server for the moment of verification.
+- The guest token is a separate relay-visible bearer token required to enter a room. It prevents room-code guessing from consuming participant slots, but is not an encryption key and cannot decrypt content.
 
 If the host disconnects, the room ends immediately. All remaining clients get a "room_closed" message with reason "host_left" and close code 4001. Hosts have a shorter idle timeout (30s) than guests (90s), since losing the host has bigger consequences.
 
@@ -48,6 +49,20 @@ Configuration via environment variables:
 - GUEST_IDLE_SECS (default 90)
 - LOCK_TIMEOUT_SECS (default 180)
 - ROOM_TTL_SECS (default 900, cleans up rooms that never got a host)
+- MAX_ROOMS (default 256)
+- MAX_CONNECTIONS (default 512)
+- MAX_CONNECTIONS_PER_IP (default 24)
+- MAX_PARTICIPANTS_PER_ROOM (default 12)
+- MAX_MESSAGE_BYTES (default 1048576)
+- RATE_WINDOW_SECS (default 10)
+- MAX_FRAMES_PER_WINDOW (default 80)
+- MAX_BYTES_PER_WINDOW (default 2097152)
+- ROOM_CREATES_PER_WINDOW (default 10, per source IP)
+- TRUST_PROXY (default false; enable only when direct access is blocked and a trusted reverse proxy sets X-Forwarded-For)
+
+Vite's fingerprinted `/assets/` files are served as long-lived immutable content.
+HTML and other entry files use `Cache-Control: no-cache`, so browsers revalidate
+and discover each new build without a manual cache clear. API responses use `no-store`.
 
 Logging is controlled with RUST_LOG (for example RUST_LOG=relay_server=debug). Only room IDs, participant IDs and events are logged, never payloads.
 

@@ -17,6 +17,8 @@ pub enum ClientMsg {
     Hello {
         #[serde(default)]
         host_token: Option<String>,
+        #[serde(default)]
+        guest_token: Option<String>,
     },
     /// Opaque encrypted payload, relayed verbatim to all other participants.
     Relay { p: String },
@@ -85,4 +87,5 @@ pub mod close {
     pub const HOST_ALREADY_CONNECTED: u16 = 4409;
     pub const PROTOCOL_ERROR: u16 = 4400;
     pub const SLOW_CONSUMER: u16 = 4413;
+    pub const ROOM_FULL: u16 = 4429;
 }

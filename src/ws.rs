@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::response::IntoResponse;
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
@@ -30,17 +31,50 @@ use crate::SharedState;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_INTERVAL: Duration = Duration::from_secs(10);
-/// Max frame size. Generous enough for encrypted history snapshots, small
-/// enough that a hostile client can't balloon memory.
-const MAX_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
-
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(room_id): Path<String>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     State(state): State<SharedState>,
-) -> impl IntoResponse {
-    ws.max_message_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_socket(socket, state, room_id))
+) -> Response {
+    if !valid_room_id(&room_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let client_ip = effective_client_ip(peer.ip(), &headers, state.cfg.trust_proxy);
+    let Some(permit) = state.try_open_connection(client_ip) else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    let max_message_size = state.cfg.max_message_size;
+    ws.max_message_size(max_message_size)
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            handle_socket(socket, state, room_id).await;
+        })
+        .into_response()
+}
+
+fn effective_client_ip(
+    peer_ip: std::net::IpAddr,
+    headers: &HeaderMap,
+    trust_proxy: bool,
+) -> std::net::IpAddr {
+    if !trust_proxy {
+        return peer_ip;
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(peer_ip)
+}
+
+fn valid_room_id(room_id: &str) -> bool {
+    room_id.len() == 6
+        && room_id
+            .bytes()
+            .all(|b| b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(&b))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: SharedState, room_id: String) {
@@ -54,7 +88,13 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, room_id: Strin
     };
 
     // ---- Phase 2: registration -------------------------------------------
-    let (my_id, is_host, rx, last_seen) = match register(&state, &room_id, hello.as_deref()) {
+    let (host_token, guest_token) = hello;
+    let (my_id, is_host, rx, last_seen) = match register(
+        &state,
+        &room_id,
+        host_token.as_deref(),
+        guest_token.as_deref(),
+    ) {
         Ok(v) => v,
         Err(code) => {
             close_with(&mut socket, code).await;
@@ -90,7 +130,7 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, room_id: Strin
 }
 
 /// Reads the mandatory first `hello` frame. Returns the presented host token.
-async fn read_hello(socket: &mut WebSocket) -> Result<Option<String>, ()> {
+async fn read_hello(socket: &mut WebSocket) -> Result<(Option<String>, Option<String>), ()> {
     let deadline = tokio::time::timeout(HELLO_TIMEOUT, async {
         while let Some(Ok(msg)) = socket.recv().await {
             match msg {
@@ -105,14 +145,22 @@ async fn read_hello(socket: &mut WebSocket) -> Result<Option<String>, ()> {
         return Err(());
     };
     match serde_json::from_str::<ClientMsg>(&txt) {
-        Ok(ClientMsg::Hello { host_token }) => Ok(host_token),
+        Ok(ClientMsg::Hello {
+            host_token,
+            guest_token,
+        }) => Ok((host_token, guest_token)),
         _ => Err(()),
     }
 }
 
 type Registered = (u64, bool, mpsc::Receiver<Outbound>, Arc<StdMutex<Instant>>);
 
-fn register(state: &SharedState, room_id: &str, host_token: Option<&str>) -> Result<Registered, u16> {
+fn register(
+    state: &SharedState,
+    room_id: &str,
+    host_token: Option<&str>,
+    guest_token: Option<&str>,
+) -> Result<Registered, u16> {
     let mut rooms = state.rooms.lock().unwrap();
     let room = rooms.get_mut(room_id).ok_or(close::ROOM_NOT_FOUND)?;
     if room.closing {
@@ -121,6 +169,9 @@ fn register(state: &SharedState, room_id: &str, host_token: Option<&str>) -> Res
 
     let is_host = match host_token {
         Some(token) => {
+            if token.len() != 43 {
+                return Err(close::BAD_HOST_TOKEN);
+            }
             let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
             if !room.verify_host_token(&hash) {
                 return Err(close::BAD_HOST_TOKEN);
@@ -130,8 +181,21 @@ fn register(state: &SharedState, room_id: &str, host_token: Option<&str>) -> Res
             }
             true
         }
-        None => false,
+        None => {
+            let Some(token) = guest_token.filter(|token| token.len() == 43) else {
+                return Err(close::BAD_HOST_TOKEN);
+            };
+            let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            if !room.verify_guest_token(&hash) {
+                return Err(close::BAD_HOST_TOKEN);
+            }
+            false
+        }
     };
+
+    if room.count() >= state.cfg.max_participants_per_room {
+        return Err(close::ROOM_FULL);
+    }
 
     let id = room.next_id;
     room.next_id += 1;
@@ -171,7 +235,23 @@ async fn read_loop(
     is_host: bool,
     last_seen: &Arc<StdMutex<Instant>>,
 ) {
+    let mut rate_started = Instant::now();
+    let mut frames_in_window = 0_u32;
+    let mut bytes_in_window = 0_usize;
     while let Some(Ok(msg)) = stream.next().await {
+        if rate_started.elapsed() >= state.cfg.rate_window {
+            rate_started = Instant::now();
+            frames_in_window = 0;
+            bytes_in_window = 0;
+        }
+        frames_in_window = frames_in_window.saturating_add(1);
+        bytes_in_window = bytes_in_window.saturating_add(message_len(&msg));
+        if frames_in_window > state.cfg.max_frames_per_window
+            || bytes_in_window > state.cfg.max_bytes_per_window
+        {
+            info!(room = %room_id, id = my_id, "connection rate limited");
+            break;
+        }
         *last_seen.lock().unwrap() = Instant::now();
         let txt = match msg {
             Message::Text(t) => t,
@@ -183,18 +263,30 @@ async fn read_loop(
             continue;
         };
         match parsed {
-            ClientMsg::Hello { .. } => { /* duplicate hello: ignore */ }
+            ClientMsg::Hello { .. } => break,
             ClientMsg::Relay { p } => handle_relay(state, room_id, my_id, is_host, p),
             ClientMsg::GenStart => handle_gen_start(state, room_id, my_id, is_host),
             ClientMsg::GenEnd => handle_gen_end(state, room_id, my_id, is_host),
-            ClientMsg::Policy { everyone } => handle_policy(state, room_id, my_id, is_host, everyone),
+            ClientMsg::Policy { everyone } => {
+                handle_policy(state, room_id, my_id, is_host, everyone)
+            }
         }
+    }
+}
+
+fn message_len(message: &Message) -> usize {
+    match message {
+        Message::Text(text) => text.len(),
+        Message::Binary(bytes) | Message::Ping(bytes) | Message::Pong(bytes) => bytes.len(),
+        Message::Close(_) => 0,
     }
 }
 
 fn handle_relay(state: &SharedState, room_id: &str, my_id: u64, is_host: bool, p: String) {
     let mut rooms = state.rooms.lock().unwrap();
-    let Some(room) = rooms.get_mut(room_id) else { return };
+    let Some(room) = rooms.get_mut(room_id) else {
+        return;
+    };
     // While the generation lock is held, only the host may inject frames
     // (it is streaming the encrypted LLM answer / snapshots); everyone else
     // is muted, including whoever triggered the generation.
@@ -211,13 +303,25 @@ fn handle_relay(state: &SharedState, room_id: &str, my_id: u64, is_host: bool, p
 fn handle_gen_start(state: &SharedState, room_id: &str, my_id: u64, is_host: bool) {
     let lock_timeout = state.cfg.lock_timeout;
     let mut rooms = state.rooms.lock().unwrap();
-    let Some(room) = rooms.get_mut(room_id) else { return };
+    let Some(room) = rooms.get_mut(room_id) else {
+        return;
+    };
     if room.locked_by.is_some() {
-        room.send_to(my_id, &ServerMsg::Error { code: "already_locked" });
+        room.send_to(
+            my_id,
+            &ServerMsg::Error {
+                code: "already_locked",
+            },
+        );
         return;
     }
     if !(is_host || room.everyone_can_generate) {
-        room.send_to(my_id, &ServerMsg::Error { code: "not_allowed" });
+        room.send_to(
+            my_id,
+            &ServerMsg::Error {
+                code: "not_allowed",
+            },
+        );
         return;
     }
     room.locked_by = Some(my_id);
@@ -252,9 +356,16 @@ fn handle_gen_start(state: &SharedState, room_id: &str, my_id: u64, is_host: boo
 
 fn handle_gen_end(state: &SharedState, room_id: &str, my_id: u64, is_host: bool) {
     let mut rooms = state.rooms.lock().unwrap();
-    let Some(room) = rooms.get_mut(room_id) else { return };
+    let Some(room) = rooms.get_mut(room_id) else {
+        return;
+    };
     if !is_host {
-        room.send_to(my_id, &ServerMsg::Error { code: "not_allowed" });
+        room.send_to(
+            my_id,
+            &ServerMsg::Error {
+                code: "not_allowed",
+            },
+        );
         return;
     }
     if room.locked_by.is_none() {
@@ -270,9 +381,16 @@ fn handle_gen_end(state: &SharedState, room_id: &str, my_id: u64, is_host: bool)
 
 fn handle_policy(state: &SharedState, room_id: &str, my_id: u64, is_host: bool, everyone: bool) {
     let mut rooms = state.rooms.lock().unwrap();
-    let Some(room) = rooms.get_mut(room_id) else { return };
+    let Some(room) = rooms.get_mut(room_id) else {
+        return;
+    };
     if !is_host {
-        room.send_to(my_id, &ServerMsg::Error { code: "not_allowed" });
+        room.send_to(
+            my_id,
+            &ServerMsg::Error {
+                code: "not_allowed",
+            },
+        );
         return;
     }
     room.everyone_can_generate = everyone;
@@ -287,8 +405,12 @@ fn handle_policy(state: &SharedState, room_id: &str, my_id: u64, is_host: bool, 
 /// decision, since history and character card only exist on the host.
 fn disconnect(state: &SharedState, room_id: &str, id: u64) {
     let mut rooms = state.rooms.lock().unwrap();
-    let Some(room) = rooms.get_mut(room_id) else { return };
-    let Some(p) = room.participants.remove(&id) else { return };
+    let Some(room) = rooms.get_mut(room_id) else {
+        return;
+    };
+    let Some(p) = room.participants.remove(&id) else {
+        return;
+    };
     if p.is_host {
         close_room(&mut rooms, room_id, "host_left", close::HOST_LEFT);
         return;
@@ -337,7 +459,9 @@ pub fn close_room(
     reason: &'static str,
     code: u16,
 ) {
-    let Some(mut room) = rooms.remove(room_id) else { return };
+    let Some(mut room) = rooms.remove(room_id) else {
+        return;
+    };
     room.closing = true;
     let msg = ServerMsg::RoomClosed { reason }.to_json();
     for (_, p) in room.participants.drain() {
@@ -395,6 +519,9 @@ async fn writer_task(
 
 async fn close_with(socket: &mut WebSocket, code: u16) {
     let _ = socket
-        .send(Message::Close(Some(CloseFrame { code, reason: "".into() })))
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: "".into(),
+        })))
         .await;
 }

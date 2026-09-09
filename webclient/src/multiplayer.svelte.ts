@@ -24,6 +24,13 @@ export type JoinError = '' | 'invalid_link' | 'missing_key';
 
 const TYPING_TIMEOUT_MS = 3000;
 const TYPING_SEND_INTERVAL_MS = 1000;
+const MAX_NAME_CHARS = 32;
+const MAX_SNAPSHOT_AUTHOR_CHARS = 256;
+const MAX_CHAT_CHARS = 4000;
+const MAX_MESSAGE_ID_CHARS = 128;
+const MAX_LLM_DELTA_CHARS = 64 * 1024;
+const MAX_LLM_FINAL_CHARS = 512 * 1024;
+const MAX_SNAPSHOT_MESSAGES = 1000;
 
 interface MpMessageBase {
   id: string;
@@ -75,7 +82,16 @@ export const mpState = $state({
 
 let ws: WebSocket | null = null;
 let cryptoKey: CryptoKey | null = null;
-let pending: { roomId: string; keyB64: string } | null = null;
+let signingPublicKey: CryptoKey | null = null;
+let guestToken = '';
+let lastVerifiedHostSequence = 0;
+let hostStateInitialized = false;
+let pending: {
+  roomId: string;
+  keyB64: string;
+  guestToken: string;
+  signingPublicB64: string;
+} | null = null;
 const seenIds = new Set<string>();
 const completedStreamIds = new Set<string>();
 let remoteTypingId: number | null = null;
@@ -103,10 +119,49 @@ const b64u = {
 
 async function importKey(b64: string): Promise<void> {
   const keyBytes = b64u.decode(b64) as Uint8Array<ArrayBuffer>;
+  if (keyBytes.byteLength !== 32) throw new Error('invalid room key');
   cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, [
     'encrypt',
     'decrypt',
   ]);
+}
+
+async function importSigningKey(b64: string): Promise<void> {
+  const bytes = new Uint8Array(b64u.decode(b64));
+  if (bytes.byteLength !== 65) throw new Error('invalid host signing key');
+  signingPublicKey = await crypto.subtle.importKey(
+    'raw',
+    bytes,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['verify'],
+  );
+}
+
+function hostSignatureInput(sequence: number, body: unknown): Uint8Array<ArrayBuffer> {
+  return new TextEncoder().encode(
+    JSON.stringify({ v: 1, room: mpState.roomId, sequence, body }),
+  ) as Uint8Array<ArrayBuffer>;
+}
+
+async function verifyHostEnvelope(envelope: any): Promise<unknown | null> {
+  if (!signingPublicKey || envelope?.v !== 1 || !Number.isSafeInteger(envelope.sequence)) return null;
+  if (envelope.sequence <= lastVerifiedHostSequence || typeof envelope.sig !== 'string') return null;
+  try {
+    const valid = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      signingPublicKey,
+      new Uint8Array(b64u.decode(envelope.sig)) as Uint8Array<ArrayBuffer>,
+      hostSignatureInput(envelope.sequence, envelope.body),
+    );
+    if (!valid) return null;
+    if (!hostStateInitialized && envelope.body?.k !== 'snap') return null;
+    lastVerifiedHostSequence = envelope.sequence;
+    hostStateInitialized = true;
+    return envelope.body;
+  } catch {
+    return null;
+  }
 }
 
 async function encryptJson(obj: unknown): Promise<string> {
@@ -137,14 +192,26 @@ async function decryptJson(p: string): Promise<any | null> {
 
 // ---------------------------------------------------------------- entry
 
-function parseLink(input: string): { roomId: string; keyB64: string } | null {
+function parseLink(input: string): {
+  roomId: string;
+  keyB64: string;
+  guestToken: string;
+  signingPublicB64: string;
+} | null {
   try {
     const url = new URL(input, window.location.origin);
     const roomId = url.searchParams.get('mp') ?? '';
     const frag = new URLSearchParams(url.hash.replace(/^#/, ''));
     const key = frag.get('k') ?? '';
-    if (!roomId || !key) return null;
-    return { roomId: roomId.toUpperCase(), keyB64: key };
+    const guest = frag.get('g') ?? '';
+    const signingPublic = frag.get('s') ?? '';
+    if (!/^[A-HJ-NP-Z2-9]{6}$/i.test(roomId) || !key || !guest || !signingPublic) return null;
+    return {
+      roomId: roomId.toUpperCase(),
+      keyB64: key,
+      guestToken: guest,
+      signingPublicB64: signingPublic,
+    };
   } catch {
     return null;
   }
@@ -180,6 +247,8 @@ export async function enterRoom(displayName: string): Promise<void> {
   mpState.closedReason = '';
   try {
     await importKey(pending.keyB64);
+    await importSigningKey(pending.signingPublicB64);
+    guestToken = pending.guestToken;
   } catch {
     mpState.connecting = false;
     mpState.error = 'invalid_link';
@@ -193,6 +262,10 @@ export function backToJoin(): void {
   ws?.close(1000);
   ws = null;
   cryptoKey = null;
+  signingPublicKey = null;
+  guestToken = '';
+  lastVerifiedHostSequence = 0;
+  hostStateInitialized = false;
   pending = null;
   seenIds.clear();
   completedStreamIds.clear();
@@ -234,7 +307,7 @@ function connect(roomId: string): void {
   ws = socket;
 
   socket.onopen = () => {
-    ws?.send(JSON.stringify({ t: 'hello' }));
+    ws?.send(JSON.stringify({ t: 'hello', guest_token: guestToken }));
   };
 
   socket.onmessage = (ev) => {
@@ -285,7 +358,7 @@ async function handleServerMsg(msg: any): Promise<void> {
       mpState.selfId = msg.you;
       mpState.count = msg.count;
       mpState.lockedBy = msg.locked_by ?? null;
-      mpState.everyoneCanGenerate = msg.everyone_can_generate;
+      mpState.everyoneCanGenerate = false;
       break;
 
     case 'joined':
@@ -301,7 +374,7 @@ async function handleServerMsg(msg: any): Promise<void> {
 
     case 'relay': {
       const inner = await decryptJson(msg.p);
-      if (inner) handleDecrypted(inner, Number(msg.from));
+      if (inner) await handleDecrypted(inner, Number(msg.from));
       break;
     }
 
@@ -315,7 +388,7 @@ async function handleServerMsg(msg: any): Promise<void> {
       break;
 
     case 'policy':
-      mpState.everyoneCanGenerate = msg.everyone;
+      // Policy displayed by the client is host-signed inside E2EE payloads.
       break;
 
     case 'room_closed':
@@ -355,17 +428,39 @@ function insertSorted(message: MpMessage): void {
   mpState.messages.sort((a, b) => a.ts - b.ts);
 }
 
-function handleDecrypted(inner: any, sourceId: number): void {
+function safeTimestamp(value: unknown, fallback = Date.now()): number {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp >= 0 && timestamp <= 8.64e15
+    ? timestamp
+    : fallback;
+}
+
+async function handleDecrypted(inner: any, sourceId: number): Promise<void> {
+  if (!inner || typeof inner !== 'object') return;
+  let hostAuthenticated = false;
+  if (inner.k === 'host') {
+    inner = await verifyHostEnvelope(inner);
+    if (!inner || typeof inner !== 'object') return;
+    hostAuthenticated = true;
+  }
+  if (['llm_d', 'llm_e', 'snap', 'policy'].includes(inner.k) && !hostAuthenticated) return;
+
   switch (inner.k) {
     case 'chat':
-      if (typeof inner.id !== 'string' || seenIds.has(inner.id)) return;
+      if (typeof inner.id !== 'string'
+        || inner.id.length > MAX_MESSAGE_ID_CHARS
+        || seenIds.has(inner.id)
+        || typeof inner.name !== 'string'
+        || inner.name.length > MAX_NAME_CHARS
+        || typeof inner.text !== 'string'
+        || inner.text.length > MAX_CHAT_CHARS) return;
       seenIds.add(inner.id);
       mpState.messages.push({
         id: inner.id,
         kind: 'chat',
         author: String(inner.name ?? '?'),
         text: String(inner.text ?? ''),
-        ts: Number(inner.ts) || Date.now(),
+        ts: safeTimestamp(inner.ts),
       });
       clearRemoteTyping(sourceId);
       break;
@@ -375,12 +470,16 @@ function handleDecrypted(inner: any, sourceId: number): void {
       if (inner.active === false) {
         clearRemoteTyping(sourceId);
       } else {
-        showRemoteTyping(sourceId, String(inner.name ?? '?'));
+        if (typeof inner.name === 'string' && inner.name.length <= MAX_NAME_CHARS) {
+          showRemoteTyping(sourceId, inner.name);
+        }
       }
       break;
 
     case 'llm_d': {
       const mid = String(inner.mid);
+      if (!mid || mid.length > MAX_MESSAGE_ID_CHARS || typeof inner.d !== 'string'
+        || inner.d.length > MAX_LLM_DELTA_CHARS) return;
       if (completedStreamIds.has(mid)) return;
       let m = mpState.messages.find(
         (message): message is MpContentMessage => message.kind === 'llm' && message.id === mid,
@@ -391,19 +490,20 @@ function handleDecrypted(inner: any, sourceId: number): void {
           kind: 'llm',
           author: String(inner.name ?? mpState.characterName ?? 'AI'),
           text: '',
-          ts: Number(inner.ts) || Date.now(),
+          ts: safeTimestamp(inner.ts),
           streaming: true,
         };
         seenIds.add(m.id);
         insertSorted(m);
         if (!mpState.characterName && inner.name) mpState.characterName = String(inner.name);
       }
-      m.text += String(inner.d ?? '');
+      m.text += inner.d;
       break;
     }
 
     case 'llm_e': {
       const mid = String(inner.mid);
+      if (!mid || mid.length > MAX_MESSAGE_ID_CHARS) return;
       if (inner.cancelled === true) {
         seenIds.add(mid);
         completedStreamIds.add(mid);
@@ -412,9 +512,11 @@ function handleDecrypted(inner: any, sourceId: number): void {
       }
       if (completedStreamIds.has(mid)) return;
       completedStreamIds.add(mid);
-      const finalText = typeof inner.text === 'string' ? inner.text : null;
+      const finalText = typeof inner.text === 'string' && inner.text.length <= MAX_LLM_FINAL_CHARS
+        ? inner.text
+        : null;
       const finalAuthor = typeof inner.name === 'string' ? inner.name : null;
-      const finalTimestamp = Number(inner.ts) || 0;
+      const finalTimestamp = safeTimestamp(inner.ts, 0);
       let m = mpState.messages.find(
         (message): message is MpContentMessage => message.kind === 'llm' && message.id === mid,
       );
@@ -450,22 +552,32 @@ function handleDecrypted(inner: any, sourceId: number): void {
         mpState.characterName = inner.charName;
       }
       applySessionCharacter(inner.character);
-      if (Array.isArray(inner.msgs)) {
+      if (Array.isArray(inner.msgs) && inner.msgs.length <= MAX_SNAPSHOT_MESSAGES) {
         let added = false;
         for (const raw of inner.msgs) {
-          if (typeof raw?.id !== 'string' || seenIds.has(raw.id)) continue;
+          if (typeof raw?.id !== 'string'
+            || raw.id.length > MAX_MESSAGE_ID_CHARS
+            || seenIds.has(raw.id)
+            || typeof raw.author !== 'string'
+            || raw.author.length > MAX_SNAPSHOT_AUTHOR_CHARS
+            || typeof raw.text !== 'string'
+            || raw.text.length > MAX_LLM_FINAL_CHARS) continue;
           seenIds.add(raw.id);
           mpState.messages.push({
             id: raw.id,
             kind: raw.kind === 'llm' ? 'llm' : 'chat',
             author: String(raw.author ?? '?'),
             text: String(raw.text ?? ''),
-            ts: Number(raw.ts) || 0,
+            ts: safeTimestamp(raw.ts, 0),
           });
           added = true;
         }
         if (added) mpState.messages.sort((a, b) => a.ts - b.ts);
       }
+      break;
+
+    case 'policy':
+      if (typeof inner.everyone === 'boolean') mpState.everyoneCanGenerate = inner.everyone;
       break;
   }
 }
@@ -547,5 +659,5 @@ export async function sendChat(text: string): Promise<void> {
 
 export function requestGeneration(): void {
   if (mpState.lockedBy !== null || !mpState.everyoneCanGenerate) return;
-  ws?.send(JSON.stringify({ t: 'gen_start' }));
+  void sendRelay({ k: 'gen_req', id: crypto.randomUUID() });
 }
