@@ -12,6 +12,7 @@
     backToJoin,
     leaveRoom,
     sendChat,
+    sendTyping,
     requestGeneration,
   } from './multiplayer.svelte';
 
@@ -77,6 +78,7 @@
       } satisfies Record<JoinError, string>,
       systemParticipantJoined: (count: number) => m.system_participant_joined({ count }, options),
       systemParticipantLeft: (count: number) => m.system_participant_left({ count }, options),
+      humanTyping: (name: string) => m.human_typing({ name }, options),
     };
   });
 
@@ -228,7 +230,10 @@
             </article>
           {/if}
         {/each}
-        {#if mpState.messages.length === 0}
+        {#if mpState.remoteTypingName}
+          <p class="human-typing" aria-live="polite">{copy.humanTyping(mpState.remoteTypingName)}</p>
+        {/if}
+        {#if mpState.messages.length === 0 && !mpState.remoteTypingName}
           <div class="empty-state">
             <span aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg></span>
             <p>{copy.emptyTitle}</p>
@@ -244,7 +249,7 @@
       <form class="composer-shell" onsubmit={(event) => { event.preventDefault(); void submitChat(); }}>
         <div class="composer-wrap">
           <div class="composer">
-            <textarea bind:this={composerEl} bind:value={chatInput} placeholder={locked ? copy.waitBriefly : copy.messagePlaceholder} disabled={locked} maxlength="4000" rows="1" aria-label={copy.message} oninput={resizeComposer} onkeydown={handleComposerKeydown}></textarea>
+            <textarea bind:this={composerEl} bind:value={chatInput} placeholder={locked ? copy.waitBriefly : copy.messagePlaceholder} disabled={locked} maxlength="4000" rows="1" aria-label={copy.message} oninput={() => { resizeComposer(); sendTyping(Boolean(chatInput.trim())); }} onkeydown={handleComposerKeydown}></textarea>
             <div class="composer-toolbar">
               <span class:active-lock={locked} class="room-status">
                 {#if locked}<span class="typing-dot" aria-hidden="true"></span>{copy.characterTyping(mpState.characterName || copy.defaultCharacter)}{:else}{copy.participantsInRoom(mpState.count)}{/if}

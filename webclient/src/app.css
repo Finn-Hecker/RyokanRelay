@@ -161,6 +161,7 @@ button:disabled { cursor: not-allowed; opacity: 0.35; }
 .participant-body > p { padding: 11px 15px; border: 1px solid rgba(255,255,255,.045); border-radius: 16px 16px 16px 4px; background: rgba(255,255,255,.035); color: #d0d0d5; font-size: 14px; line-height: 1.55; }
 .participant-message.mine .participant-body > p { border-radius: 16px 16px 4px 16px; background: #1e1e22; color: #e0e0e4; }
 .system-message { margin: 19px 0; color: #505057; font-size: 10.5px; text-align: center; }
+.human-typing { margin: 0 4px 34px; color: #67676f; font-size: 13px; font-style: italic; }
 .empty-state { min-height: 45vh; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #56565e; text-align: center; }
 .empty-state > span { width: 42px; height: 42px; margin-bottom: 13px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
 .empty-state p { margin: 0 0 5px; color: #797982; font-size: 13px; font-weight: 500; }

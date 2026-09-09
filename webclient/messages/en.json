@@ -39,6 +39,7 @@
   "message_placeholder": "Write a message…",
   "message": "Message",
   "character_typing": "{characterName} is typing…",
+  "human_typing": "{name} is typing…",
   "default_character": "The character",
   "generate_response_title": "Ask the character to respond",
   "generate_response": "Respond now",

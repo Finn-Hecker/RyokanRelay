@@ -22,6 +22,9 @@ export type ClosedReason =
 
 export type JoinError = '' | 'invalid_link' | 'missing_key';
 
+const TYPING_TIMEOUT_MS = 3000;
+const TYPING_SEND_INTERVAL_MS = 1000;
+
 interface MpMessageBase {
   id: string;
   ts: number;
@@ -62,6 +65,7 @@ export const mpState = $state({
   lockedBy: null as number | null,
   everyoneCanGenerate: false,
   messages: [] as MpMessage[],
+  remoteTypingName: '',
   displayName: '',
   characterName: '',
   sessionCharacter: null as SessionCharacter | null,
@@ -74,6 +78,11 @@ let cryptoKey: CryptoKey | null = null;
 let pending: { roomId: string; keyB64: string } | null = null;
 const seenIds = new Set<string>();
 const completedStreamIds = new Set<string>();
+let remoteTypingId: number | null = null;
+let remoteTypingTimer: ReturnType<typeof setTimeout> | null = null;
+let localTyping = false;
+let lastTypingSentAt = 0;
+let typingRelayChain = Promise.resolve();
 
 // ---------------------------------------------------------------- crypto
 
@@ -187,6 +196,10 @@ export function backToJoin(): void {
   pending = null;
   seenIds.clear();
   completedStreamIds.clear();
+  clearRemoteTyping();
+  localTyping = false;
+  lastTypingSentAt = 0;
+  typingRelayChain = Promise.resolve();
   Object.assign(mpState, {
     view: 'join',
     connected: false,
@@ -197,6 +210,7 @@ export function backToJoin(): void {
     lockedBy: null,
     everyoneCanGenerate: false,
     messages: [],
+    remoteTypingName: '',
     characterName: '',
     sessionCharacter: null,
     closedReason: '',
@@ -281,12 +295,13 @@ async function handleServerMsg(msg: any): Promise<void> {
 
     case 'left':
       mpState.count = msg.count;
+      clearRemoteTyping(Number(msg.id));
       pushSystem('participant_left', msg.count);
       break;
 
     case 'relay': {
       const inner = await decryptJson(msg.p);
-      if (inner) handleDecrypted(inner);
+      if (inner) handleDecrypted(inner, Number(msg.from));
       break;
     }
 
@@ -340,7 +355,7 @@ function insertSorted(message: MpMessage): void {
   mpState.messages.sort((a, b) => a.ts - b.ts);
 }
 
-function handleDecrypted(inner: any): void {
+function handleDecrypted(inner: any, sourceId: number): void {
   switch (inner.k) {
     case 'chat':
       if (typeof inner.id !== 'string' || seenIds.has(inner.id)) return;
@@ -352,6 +367,16 @@ function handleDecrypted(inner: any): void {
         text: String(inner.text ?? ''),
         ts: Number(inner.ts) || Date.now(),
       });
+      clearRemoteTyping(sourceId);
+      break;
+
+    case 'typing':
+      if (sourceId === mpState.selfId) return;
+      if (inner.active === false) {
+        clearRemoteTyping(sourceId);
+      } else {
+        showRemoteTyping(sourceId, String(inner.name ?? '?'));
+      }
       break;
 
     case 'llm_d': {
@@ -463,10 +488,44 @@ function finalizeStreaming(): void {
 
 // ---------------------------------------------------------------- sending
 
+function clearRemoteTyping(sourceId?: number): void {
+  if (sourceId !== undefined && sourceId !== remoteTypingId) return;
+  if (remoteTypingTimer) clearTimeout(remoteTypingTimer);
+  remoteTypingTimer = null;
+  remoteTypingId = null;
+  mpState.remoteTypingName = '';
+}
+
+function showRemoteTyping(sourceId: number, name: string): void {
+  clearRemoteTyping();
+  remoteTypingId = sourceId;
+  mpState.remoteTypingName = name;
+  remoteTypingTimer = setTimeout(() => clearRemoteTyping(sourceId), TYPING_TIMEOUT_MS);
+}
+
+async function sendRelay(obj: unknown): Promise<void> {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ t: 'relay', p: await encryptJson(obj) }));
+}
+
+export function sendTyping(active = true): void {
+  if (!mpState.connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  if (active && localTyping && now - lastTypingSentAt < TYPING_SEND_INTERVAL_MS) return;
+  if (!active && !localTyping) return;
+
+  localTyping = active;
+  lastTypingSentAt = now;
+  const frame = { k: 'typing', name: mpState.displayName || '?', active };
+  typingRelayChain = typingRelayChain.then(() => sendRelay(frame)).catch(() => undefined);
+}
+
 export async function sendChat(text: string): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed || mpState.lockedBy !== null) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  sendTyping(false);
+  await typingRelayChain;
   const msg = {
     k: 'chat',
     id: crypto.randomUUID(),
@@ -483,7 +542,7 @@ export async function sendChat(text: string): Promise<void> {
     ts: msg.ts,
     mine: true,
   });
-  ws.send(JSON.stringify({ t: 'relay', p: await encryptJson(msg) }));
+  await sendRelay(msg);
 }
 
 export function requestGeneration(): void {
