@@ -104,6 +104,7 @@ impl Room {
 /// Runtime configuration, read once from the environment at startup.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub bind_addr: IpAddr,
     pub port: u16,
     /// Idle limit for the host connection. Deliberately stricter than for
     /// guests: losing the host kills the room, so we want to detect a dead
@@ -140,6 +141,10 @@ impl Config {
             )
         }
         Self {
+            bind_addr: std::env::var("BIND_ADDR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
             port: std::env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())

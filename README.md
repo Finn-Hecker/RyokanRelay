@@ -40,10 +40,12 @@ Close codes: 4001 host left, 4008 idle, 4400 protocol error, 4403 invalid host t
 cargo run --release
 ```
 
-Listens on 0.0.0.0:8787 by default.
+Listens on 0.0.0.0:8787 by default. Set `BIND_ADDR=127.0.0.1` when a reverse
+proxy on the same host is the relay's only intended entry point.
 
 Configuration via environment variables:
 
+- BIND_ADDR (default 0.0.0.0)
 - PORT (default 8787)
 - HOST_IDLE_SECS (default 30)
 - GUEST_IDLE_SECS (default 90)
@@ -66,7 +68,11 @@ and discover each new build without a manual cache clear. API responses use `no-
 
 Logging is controlled with RUST_LOG (for example RUST_LOG=relay_server=debug). Only room IDs, participant IDs and events are logged, never payloads.
 
-CORS is permissive by default for development. For production, restrict it to your frontend's origin and run behind TLS (wss://), otherwise the host token and metadata are readable on the wire.
+CORS is permissive by default. A browser client served by the relay is same-origin
+and does not need CORS, but the packaged Tauri client uses a different origin and
+does. If this is restricted in production, keep `http://tauri.localhost` (Windows
+and Android) alongside the public browser origin. TLS (`https://` and `wss://`)
+protects relay tokens and metadata in transit.
 
 ## Testing
 

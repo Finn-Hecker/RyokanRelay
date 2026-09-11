@@ -49,6 +49,7 @@ async fn main() {
         .init();
 
     let cfg = Config::from_env();
+    let bind_addr = cfg.bind_addr;
     let port = cfg.port;
     let state: SharedState = Arc::new(AppState::new(cfg));
 
@@ -67,7 +68,7 @@ async fn main() {
         .layer(middleware::from_fn(cache_headers))
         .with_state(state);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = std::net::SocketAddr::new(bind_addr, port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     info!(%addr, "relay server listening");
     axum::serve(
